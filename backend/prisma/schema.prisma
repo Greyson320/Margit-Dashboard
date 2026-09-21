@@ -1,0 +1,245 @@
+// Grant Application Portal — data model.
+// Users, grants, requirements, applications, file_uploads,
+// application_responses, reviews and audit_logs, plus notifications for the
+// reminder and result e-mails.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  applicant
+  admin
+  reviewer
+}
+
+enum Visibility {
+  public
+  internal
+  archived
+}
+
+enum FieldType {
+  text
+  textarea
+  number
+  date
+  select
+  multiselect
+  checkbox
+  file
+  url
+  currency
+}
+
+enum ApplicationStatus {
+  draft
+  submitted
+  under_review
+  approved
+  rejected
+  withdrawn
+}
+
+enum VirusStatus {
+  clean
+  infected
+  unknown
+}
+
+enum NotificationChannel {
+  email
+  in_app
+}
+
+model User {
+  id           BigInt   @id @default(autoincrement())
+  name         String
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  role         Role     @default(applicant)
+  organization String?
+  phone        String?
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  applications  Application[]
+  grantsCreated Grant[]        @relation("GrantCreatedBy")
+  reviews       Review[]
+  uploads       FileUpload[]
+  auditLogs     AuditLog[]
+  notifications Notification[]
+  refreshTokens RefreshToken[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        BigInt   @id @default(autoincrement())
+  userId    BigInt   @map("user_id")
+  tokenHash String   @unique @map("token_hash")
+  expiresAt DateTime @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model Grant {
+  id             BigInt     @id @default(autoincrement())
+  title          String
+  slug           String     @unique
+  description    String
+  maxAmount      Decimal?   @map("max_amount") @db.Decimal(14, 2)
+  currency       String     @default("EUR")
+  deadline       DateTime?
+  openAt         DateTime?  @map("open_at")
+  targetGroups   Json?      @map("target_groups")
+  eligibility    String?
+  expectedImpact String?    @map("expected_impact")
+  visibility     Visibility @default(public)
+  createdById    BigInt?    @map("created_by")
+  createdAt      DateTime   @default(now()) @map("created_at")
+  updatedAt      DateTime   @updatedAt @map("updated_at")
+
+  createdBy    User?         @relation("GrantCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  requirements Requirement[]
+  applications Application[]
+
+  @@index([deadline])
+  @@map("grants")
+}
+
+model Requirement {
+  id                  BigInt    @id @default(autoincrement())
+  grantId             BigInt    @map("grant_id")
+  key                 String
+  label               String
+  fieldType           FieldType @map("field_type")
+  helpText            String?   @map("help_text")
+  required            Boolean   @default(true)
+  optionsJson         Json?     @map("options_json")
+  validationsJson     Json?     @map("validations_json")
+  fileConstraintsJson Json?     @map("file_constraints_json")
+  orderIndex          Int       @default(0) @map("order_index")
+
+  grant     Grant                 @relation(fields: [grantId], references: [id], onDelete: Cascade)
+  responses ApplicationResponse[]
+
+  @@unique([grantId, key])
+  @@map("requirements")
+}
+
+model Application {
+  id          BigInt            @id @default(autoincrement())
+  userId      BigInt            @map("user_id")
+  grantId     BigInt            @map("grant_id")
+  status      ApplicationStatus @default(draft)
+  submittedAt DateTime?         @map("submitted_at")
+  decidedAt   DateTime?         @map("decided_at")
+  decisionNote String?          @map("decision_note")
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+
+  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  grant     Grant                 @relation(fields: [grantId], references: [id], onDelete: Cascade)
+  responses ApplicationResponse[]
+  reviews   Review[]
+
+  @@unique([userId, grantId])
+  @@index([status])
+  @@map("applications")
+}
+
+model FileUpload {
+  id           BigInt       @id @default(autoincrement())
+  userId       BigInt?      @map("user_id")
+  storageKey   String       @map("storage_key")
+  filename     String
+  mimetype     String
+  sizeBytes    BigInt       @map("size_bytes")
+  checksum     String?
+  virusScanned Boolean      @default(false) @map("virus_scanned")
+  virusStatus  VirusStatus? @map("virus_status")
+  createdAt    DateTime     @default(now()) @map("created_at")
+
+  user      User?                 @relation(fields: [userId], references: [id], onDelete: SetNull)
+  responses ApplicationResponse[]
+
+  @@map("file_uploads")
+}
+
+model ApplicationResponse {
+  id            BigInt    @id @default(autoincrement())
+  applicationId BigInt    @map("application_id")
+  requirementId BigInt    @map("requirement_id")
+  valueText     String?   @map("value_text")
+  valueNumber   Decimal?  @map("value_number") @db.Decimal(18, 4)
+  valueDate     DateTime? @map("value_date") @db.Date
+  valueJson     Json?     @map("value_json")
+  fileId        BigInt?   @map("file_id")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  requirement Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  file        FileUpload? @relation(fields: [fileId], references: [id], onDelete: SetNull)
+
+  @@unique([applicationId, requirementId])
+  @@map("application_responses")
+}
+
+model Review {
+  id            BigInt   @id @default(autoincrement())
+  applicationId BigInt   @map("application_id")
+  reviewerId    BigInt   @map("reviewer_id")
+  score         Decimal? @db.Decimal(5, 2)
+  notes         String?
+  recommendation String? @map("recommendation")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  reviewer    User        @relation(fields: [reviewerId], references: [id], onDelete: Cascade)
+
+  @@unique([applicationId, reviewerId])
+  @@map("reviews")
+}
+
+model Notification {
+  id        BigInt              @id @default(autoincrement())
+  userId    BigInt              @map("user_id")
+  channel   NotificationChannel @default(in_app)
+  subject   String
+  body      String
+  readAt    DateTime?           @map("read_at")
+  sentAt    DateTime?           @map("sent_at")
+  createdAt DateTime            @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+model AuditLog {
+  id          BigInt   @id @default(autoincrement())
+  userId      BigInt?  @map("user_id")
+  entityType  String   @map("entity_type")
+  entityId    BigInt?  @map("entity_id")
+  action      String
+  payloadJson Json?    @map("payload_json")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}

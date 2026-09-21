@@ -1,0 +1,886 @@
+openapi: 3.0.3
+info:
+  title: Grant Application Portal API
+  version: 1.0.0
+  description: >
+    Backend for the grant application portal: applicants browse grants, fill in
+    a form generated from per-grant requirements, upload documents and submit;
+    staff define grants, review applications and export the results.
+servers:
+  - url: http://localhost:4000
+    description: Local development
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+  - name: Grants
+  - name: Applications
+  - name: Uploads
+  - name: Reviews
+  - name: Notifications
+  - name: Users
+  - name: Stats
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        details: {}
+
+    User:
+      type: object
+      properties:
+        id: { type: string, description: 64-bit id serialized as a string }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { type: string, enum: [applicant, admin, reviewer] }
+        organization: { type: string, nullable: true }
+
+    AuthPayload:
+      type: object
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        access_token: { type: string }
+        refresh_token: { type: string }
+
+    FieldType:
+      type: string
+      enum: [text, textarea, number, date, select, multiselect, checkbox, file, url, currency]
+
+    Requirement:
+      type: object
+      required: [key, label, field_type]
+      properties:
+        id: { type: string }
+        key:
+          type: string
+          pattern: '^[a-z0-9_]+$'
+          description: Stable identifier; answers survive relabelling and appear as CSV columns.
+        label: { type: string }
+        field_type: { $ref: '#/components/schemas/FieldType' }
+        help_text: { type: string, nullable: true }
+        required: { type: boolean, default: true }
+        options:
+          type: array
+          items: { type: string }
+          nullable: true
+        validations:
+          type: object
+          nullable: true
+          properties:
+            min: { type: number }
+            max: { type: number }
+            minLength: { type: integer }
+            maxLength: { type: integer }
+            regex: { type: string }
+            requiredIf:
+              type: object
+              properties:
+                key: { type: string }
+                equals: {}
+        file_constraints:
+          type: object
+          nullable: true
+          properties:
+            mimetypes:
+              type: array
+              items: { type: string }
+            maxMB: { type: number }
+        order_index: { type: integer }
+
+    Grant:
+      type: object
+      required: [title, description]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        slug: { type: string }
+        description: { type: string }
+        max_amount: { type: number, nullable: true }
+        currency: { type: string, default: EUR }
+        deadline: { type: string, format: date-time, nullable: true }
+        open_at: { type: string, format: date-time, nullable: true }
+        target_groups:
+          type: array
+          items: { type: string }
+          nullable: true
+        eligibility: { type: string, nullable: true }
+        expected_impact: { type: string, nullable: true }
+        visibility: { type: string, enum: [public, internal, archived] }
+        state:
+          type: string
+          enum: [open, upcoming, closed, archived]
+          readOnly: true
+        is_open: { type: boolean, readOnly: true }
+        application_count: { type: integer, readOnly: true }
+        requirements:
+          type: array
+          items: { $ref: '#/components/schemas/Requirement' }
+
+    ApplicationStatus:
+      type: string
+      enum: [draft, submitted, under_review, approved, rejected, withdrawn]
+
+    ValidationIssue:
+      type: object
+      properties:
+        key: { type: string }
+        label: { type: string }
+        message: { type: string }
+
+    Progress:
+      type: object
+      properties:
+        total: { type: integer }
+        completed: { type: integer }
+        requiredTotal: { type: integer }
+        requiredCompleted: { type: integer }
+        percent: { type: integer }
+        missing:
+          type: array
+          items: { type: string }
+
+    ApplicationSummary:
+      type: object
+      properties:
+        id: { type: string }
+        status: { $ref: '#/components/schemas/ApplicationStatus' }
+        status_label: { type: string }
+        submitted_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time }
+        grant:
+          type: object
+          properties:
+            id: { type: string }
+            title: { type: string }
+            deadline: { type: string, format: date-time, nullable: true }
+        applicant: { $ref: '#/components/schemas/User' }
+        review_count: { type: integer }
+
+    ApplicationDetail:
+      allOf:
+        - $ref: '#/components/schemas/ApplicationSummary'
+        - type: object
+          properties:
+            decision_note: { type: string, nullable: true }
+            values:
+              type: object
+              additionalProperties: {}
+              description: One entry per requirement key.
+            files:
+              type: object
+              additionalProperties:
+                type: object
+                nullable: true
+                properties:
+                  id: { type: string }
+                  filename: { type: string }
+                  size_bytes: { type: string }
+                  mimetype: { type: string }
+            progress: { $ref: '#/components/schemas/Progress' }
+            average_score: { type: number, nullable: true }
+            allowed_transitions:
+              type: array
+              items: { $ref: '#/components/schemas/ApplicationStatus' }
+            validation_issues:
+              type: array
+              items: { $ref: '#/components/schemas/ValidationIssue' }
+            reviews:
+              type: array
+              items: { $ref: '#/components/schemas/Review' }
+
+    ResponseInput:
+      type: object
+      description: Identify the requirement by `key` or `requirement_id`.
+      properties:
+        requirement_id: { type: string }
+        key: { type: string }
+        value:
+          description: Scalar, boolean or string array, matching the field type.
+        file_id: { type: string, nullable: true }
+
+    Review:
+      type: object
+      properties:
+        id: { type: string }
+        applicationId: { type: string }
+        reviewerId: { type: string }
+        score: { type: number, nullable: true }
+        notes: { type: string, nullable: true }
+        recommendation:
+          type: string
+          nullable: true
+          enum: [approve, reject, needs_more_info]
+        reviewer: { $ref: '#/components/schemas/User' }
+
+    Notification:
+      type: object
+      properties:
+        id: { type: string }
+        subject: { type: string }
+        body: { type: string }
+        channel: { type: string, enum: [email, in_app] }
+        readAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: The role is not allowed to perform this action
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+paths:
+  /health:
+    get:
+      tags: [Stats]
+      security: []
+      summary: Liveness probe
+      responses:
+        '200': { description: OK }
+
+  /auth/register:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Register an applicant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password]
+              properties:
+                name: { type: string }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                organization: { type: string }
+                phone: { type: string }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthPayload' }
+        '400':
+          description: The e-mail is already registered
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Sign in and receive an access + refresh token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthPayload' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Exchange a refresh token (single use — it is rotated)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthPayload' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Revoke a refresh token
+      responses:
+        '204': { description: Revoked }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: The signed-in user
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    patch:
+      tags: [Auth]
+      summary: Update your own profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                organization: { type: string, nullable: true }
+                phone: { type: string, nullable: true }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+
+  /auth/change-password:
+    post:
+      tags: [Auth]
+      summary: Change your password (revokes every refresh token)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string }
+                new_password: { type: string, minLength: 8 }
+      responses:
+        '204': { description: Changed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /grants:
+    get:
+      tags: [Grants]
+      security: []
+      summary: List grants
+      parameters:
+        - { in: query, name: q, schema: { type: string } }
+        - in: query
+          name: status
+          schema: { type: string, enum: [open, upcoming, closed, archived, all], default: open }
+        - { in: query, name: target_group, schema: { type: string } }
+        - { in: query, name: take, schema: { type: integer, default: 50 } }
+        - { in: query, name: skip, schema: { type: integer, default: 0 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Grant' }
+                  total: { type: integer }
+    post:
+      tags: [Grants]
+      summary: Create a grant with its requirements (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Grant' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Grant' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /grants/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string }, description: Numeric id or slug }
+    get:
+      tags: [Grants]
+      security: []
+      summary: Grant details including requirements and your own application
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Grant' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Grants]
+      summary: Update a grant (admin)
+      description: >
+        Passing a full `requirements` array replaces the set: unknown keys are
+        created, known keys updated, omitted keys deleted with their answers.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Grant' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Grant' }
+    delete:
+      tags: [Grants]
+      summary: Delete a grant, or archive it when it already has applications (admin)
+      responses:
+        '200': { description: Archived instead of deleted }
+        '204': { description: Deleted }
+
+  /grants/{id}/requirements:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    get:
+      tags: [Grants]
+      security: []
+      summary: List the requirements of a grant
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Requirement' }
+    post:
+      tags: [Grants]
+      summary: Add a single requirement (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Requirement' }
+      responses:
+        '201':
+          description: Created
+
+  /grants/{id}/requirements/{requirementId}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+      - { in: path, name: requirementId, required: true, schema: { type: string } }
+    patch:
+      tags: [Grants]
+      summary: Update a requirement (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Requirement' }
+      responses:
+        '200': { description: Updated }
+    delete:
+      tags: [Grants]
+      summary: Delete a requirement and its answers (admin)
+      responses:
+        '204': { description: Deleted }
+
+  /applications:
+    get:
+      tags: [Applications]
+      summary: Your applications, or every application for staff
+      parameters:
+        - { in: query, name: status, schema: { type: string } }
+        - { in: query, name: grant_id, schema: { type: string } }
+        - { in: query, name: q, schema: { type: string }, description: Staff only }
+        - in: query
+          name: sort
+          schema: { type: string, enum: [created_at, updated_at, submitted_at, status], default: updated_at }
+        - { in: query, name: order, schema: { type: string, enum: [asc, desc], default: desc } }
+        - { in: query, name: take, schema: { type: integer, default: 25 } }
+        - { in: query, name: skip, schema: { type: integer, default: 0 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ApplicationSummary' }
+                  total: { type: integer }
+    post:
+      tags: [Applications]
+      summary: Start a draft application
+      description: Returns the existing draft when one already exists for this grant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [grant_id]
+              properties:
+                grant_id: { type: string }
+      responses:
+        '200': { description: An application already existed }
+        '201': { description: Draft created }
+        '400': { description: The grant is closed, archived or not open yet }
+
+  /applications/export.csv:
+    get:
+      tags: [Applications]
+      summary: CSV export of the filtered list (staff)
+      description: >
+        Scoping the export to one grant adds a column per requirement key.
+      parameters:
+        - { in: query, name: status, schema: { type: string } }
+        - { in: query, name: grant_id, schema: { type: string } }
+        - { in: query, name: q, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            text/csv:
+              schema: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /applications/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    get:
+      tags: [Applications]
+      summary: One application with answers, progress and reviews
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApplicationDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    patch:
+      tags: [Applications]
+      summary: Change the status (submit, withdraw, review, decide)
+      description: >
+        Allowed transitions depend on the role. Submitting re-validates every
+        answer server-side and rejects an incomplete application with the list
+        of issues in `details`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: '#/components/schemas/ApplicationStatus' }
+                note: { type: string, description: Included in the applicant's notification }
+      responses:
+        '200': { description: Updated }
+        '400':
+          description: The application is not complete
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409': { description: The transition is not allowed, or the deadline has passed }
+
+  /applications/{id}/responses:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    put:
+      tags: [Applications]
+      summary: Upsert answers (used by autosave)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { $ref: '#/components/schemas/ResponseInput' }
+      responses:
+        '200':
+          description: Saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  saved: { type: integer }
+                  progress: { $ref: '#/components/schemas/Progress' }
+                  validation_issues:
+                    type: array
+                    items: { $ref: '#/components/schemas/ValidationIssue' }
+        '409': { description: Already submitted, or the deadline has passed }
+
+  /applications/{id}/pdf:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    get:
+      tags: [Applications]
+      summary: Download the application as a PDF
+      responses:
+        '200':
+          description: OK
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+
+  /applications/{id}/remind:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    post:
+      tags: [Applications]
+      summary: Notify the applicant about missing items (staff)
+      responses:
+        '200': { description: Sent }
+
+  /uploads:
+    post:
+      tags: [Uploads]
+      summary: Upload a document
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        '201':
+          description: Uploaded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  file_id: { type: string }
+                  filename: { type: string }
+                  mimetype: { type: string }
+                  size_bytes: { type: string }
+        '400': { description: The file type is not allowed or the file is too large }
+
+  /uploads/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    get:
+      tags: [Uploads]
+      summary: Download a file
+      description: Redirects to a short-lived signed URL, or streams the file for local storage.
+      responses:
+        '302': { description: Redirect to a signed URL }
+        '200': { description: The file itself }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /reviews:
+    get:
+      tags: [Reviews]
+      summary: List reviews (staff)
+      parameters:
+        - { in: query, name: application_id, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Review' }
+    post:
+      tags: [Reviews]
+      summary: Create or update your review of an application (staff)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [application_id]
+              properties:
+                application_id: { type: string }
+                score: { type: number, minimum: 0, maximum: 100, nullable: true }
+                notes: { type: string, nullable: true }
+                recommendation:
+                  type: string
+                  nullable: true
+                  enum: [approve, reject, needs_more_info]
+      responses:
+        '201':
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Review' }
+
+  /reviews/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    delete:
+      tags: [Reviews]
+      summary: Remove your own review (admins may remove any)
+      responses:
+        '204': { description: Deleted }
+
+  /notifications:
+    get:
+      tags: [Notifications]
+      summary: Your notifications
+      parameters:
+        - { in: query, name: unread, schema: { type: boolean } }
+        - { in: query, name: take, schema: { type: integer, default: 30 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Notification' }
+                  unread: { type: integer }
+
+  /notifications/{id}/read:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    post:
+      tags: [Notifications]
+      summary: Mark one notification as read
+      responses:
+        '204': { description: Marked }
+
+  /notifications/read-all:
+    post:
+      tags: [Notifications]
+      summary: Mark every notification as read
+      responses:
+        '204': { description: Marked }
+
+  /notifications/deadline-reminders:
+    post:
+      tags: [Notifications]
+      summary: Remind every applicant holding a draft for a grant closing soon (admin)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                days: { type: integer, default: 7, minimum: 1, maximum: 60 }
+      responses:
+        '200':
+          description: Sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sent: { type: integer }
+
+  /users:
+    get:
+      tags: [Users]
+      summary: List users (admin)
+      parameters:
+        - { in: query, name: q, schema: { type: string } }
+        - { in: query, name: role, schema: { type: string, enum: [applicant, admin, reviewer] } }
+      responses:
+        '200': { description: OK }
+    post:
+      tags: [Users]
+      summary: Create a user with a role (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, role]
+              properties:
+                name: { type: string }
+                email: { type: string }
+                password: { type: string, minLength: 8 }
+                role: { type: string, enum: [applicant, admin, reviewer] }
+                organization: { type: string }
+      responses:
+        '201': { description: Created }
+
+  /users/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    patch:
+      tags: [Users]
+      summary: Update a user's role, status, name or password (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                role: { type: string, enum: [applicant, admin, reviewer] }
+                organization: { type: string, nullable: true }
+                is_active: { type: boolean }
+                password: { type: string, minLength: 8 }
+      responses:
+        '200': { description: Updated }
+        '400': { description: You cannot change your own role or deactivate yourself }
+
+  /stats/overview:
+    get:
+      tags: [Stats]
+      summary: Dashboard totals (staff)
+      responses:
+        '200': { description: OK }
+
+  /stats/timeline:
+    get:
+      tags: [Stats]
+      summary: Applications started and submitted per day (staff)
+      parameters:
+        - { in: query, name: days, schema: { type: integer, default: 30, minimum: 7, maximum: 365 } }
+        - { in: query, name: grant_id, schema: { type: string } }
+      responses:
+        '200': { description: OK }
+
+  /stats/audit:
+    get:
+      tags: [Stats]
+      summary: Audit log (admin)
+      parameters:
+        - { in: query, name: entity_type, schema: { type: string } }
+        - { in: query, name: take, schema: { type: integer, default: 50 } }
+        - { in: query, name: skip, schema: { type: integer, default: 0 } }
+      responses:
+        '200': { description: OK }
